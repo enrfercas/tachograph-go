@@ -265,25 +265,120 @@ func (opts AuthenticateOptions) verifyGen2CertificateChain(ctx context.Context, 
 
 // verifyGen2DataSignature verifies the ECDSA signature on the data portion of a Gen2 record.
 func (opts AuthenticateOptions) verifyGen2DataSignature(record *vuv1.RawVehicleUnitFile_Record, vuCert *securityv1.EccCertificate, auth *securityv1.Authentication) error {
-	data, signature, err := splitTransferValue(record)
+	data, signatureRecordArray, err := splitTransferValue(record)
 	if err != nil {
 		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
 		return fmt.Errorf("failed to split transfer value: %w", err)
 	}
 
-	if len(signature) == 0 {
+	if len(signatureRecordArray) == 0 {
 		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
 		return fmt.Errorf("no signature present in Gen2 record")
 	}
 
-	// For Gen2, the signature is over all the data in the transfer
-	// The signature format is plain ECDSA (R || S)
-	if err := security.VerifyEccDataSignature(data, signature, vuCert); err != nil {
+	// Gen2 VU signatures are stored as a SignatureRecordArray:
+	// [recordType:1][recordSize:2][noOfRecords:2][plain ECDSA signature].
+	// security.VerifyEccDataSignature expects only the plain R || S payload.
+	signature, err := unwrapGen2SignatureRecordArray(signatureRecordArray)
+	if err != nil {
+		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
+		return fmt.Errorf("invalid Gen2 SignatureRecordArray: %w", err)
+	}
+
+	signedData := data
+	switch record.GetType() {
+	case vuv1.TransferType_OVERVIEW_GEN2_V1, vuv1.TransferType_OVERVIEW_GEN2_V2:
+		// The Overview embeds the MSCA and VU certificate RecordArrays at
+		// the beginning of the transfer. Those certificate arrays are not
+		// part of the data covered by the VU data signature.
+		signedData, err = gen2OverviewSignedData(data)
+		if err != nil {
+			auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
+			return fmt.Errorf("failed to determine Gen2 Overview signed data: %w", err)
+		}
+	}
+
+	if err := security.VerifyEccDataSignature(signedData, signature, vuCert); err != nil {
 		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
 		return fmt.Errorf("data signature verification failed: %w", err)
 	}
 
 	return nil
+}
+
+func unwrapGen2SignatureRecordArray(raw []byte) ([]byte, error) {
+	const headerSize = 5
+	if len(raw) < headerSize {
+		return nil, fmt.Errorf("signature RecordArray too short: got %d bytes", len(raw))
+	}
+
+	recordType := raw[0]
+	recordSize := int(binary.BigEndian.Uint16(raw[1:3]))
+	recordCount := int(binary.BigEndian.Uint16(raw[3:5]))
+
+	if recordType != 0x08 {
+		return nil, fmt.Errorf("unexpected signature recordType 0x%02X, want 0x08", recordType)
+	}
+	if recordCount != 1 {
+		return nil, fmt.Errorf("unexpected signature record count %d, want 1", recordCount)
+	}
+	if recordSize <= 0 {
+		return nil, fmt.Errorf("invalid signature record size %d", recordSize)
+	}
+
+	totalSize := headerSize + recordSize*recordCount
+	if totalSize != len(raw) {
+		return nil, fmt.Errorf(
+			"signature RecordArray length mismatch: header declares %d bytes, got %d",
+			totalSize,
+			len(raw),
+		)
+	}
+
+	return raw[headerSize:totalSize], nil
+}
+
+func gen2OverviewSignedData(data []byte) ([]byte, error) {
+	// MemberStateCertificateRecordArray + VuCertificateRecordArray are
+	// embedded at the start of the Gen2 Overview but are excluded from
+	// the data covered by the VU data signature.
+	offset := 0
+	for index := 0; index < 2; index++ {
+		if offset+5 > len(data) {
+			return nil, fmt.Errorf(
+				"certificate RecordArray %d header truncated at offset %d",
+				index,
+				offset,
+			)
+		}
+
+		recordSize := int(binary.BigEndian.Uint16(data[offset+1 : offset+3]))
+		recordCount := int(binary.BigEndian.Uint16(data[offset+3 : offset+5]))
+		if recordCount != 1 {
+			return nil, fmt.Errorf(
+				"certificate RecordArray %d has %d records, want 1",
+				index,
+				recordCount,
+			)
+		}
+
+		arraySize := 5 + recordSize*recordCount
+		if arraySize < 5 || offset+arraySize > len(data) {
+			return nil, fmt.Errorf(
+				"certificate RecordArray %d exceeds Overview data: offset=%d size=%d data=%d",
+				index,
+				offset,
+				arraySize,
+				len(data),
+			)
+		}
+		offset += arraySize
+	}
+
+	if offset >= len(data) {
+		return nil, fmt.Errorf("Overview contains no signed data after certificate arrays")
+	}
+	return data[offset:], nil
 }
 
 // findOverviewRecord finds the first Gen1 Overview record in the file.

@@ -91,95 +91,87 @@ func sizeOfTechnicalDataGen1(data []byte) (totalSize, signatureSize int, err err
 
 // sizeOfTechnicalDataGen2V1 calculates size by parsing all Gen2 V1 RecordArrays.
 func sizeOfTechnicalDataGen2V1(data []byte) (totalSize, signatureSize int, err error) {
-	offset := 0
-
-	// VuIdentificationRecordArray
-	size, sizeErr := sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("VuIdentificationRecordArray: %w", sizeErr)
-	}
-	offset += size
-
-	// SensorPairedRecordArray
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("SensorPairedRecordArray: %w", sizeErr)
-	}
-	offset += size
-
-	// VuCalibrationRecordArray
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("VuCalibrationRecordArray: %w", sizeErr)
-	}
-	offset += size
-
-	// SignatureRecordArray (last)
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("SignatureRecordArray: %w", sizeErr)
-	}
-	signatureSizeGen2 := size
-	offset += size
-
-	return offset, signatureSizeGen2, nil
+	return sizeOfTechnicalDataGen2Compatible(data, 4)
 }
 
-// sizeOfTechnicalDataGen2V2 calculates size by parsing all Gen2 V2 RecordArrays.
 func sizeOfTechnicalDataGen2V2(data []byte) (totalSize, signatureSize int, err error) {
+	return sizeOfTechnicalDataGen2Compatible(data, 7)
+}
+
+func sizeOfTechnicalDataGen2Compatible(data []byte, legacyArrayCount int) (totalSize, signatureSize int, err error) {
+	const (
+		signatureRecordType = byte(0x08)
+		maxSpecArrays       = 8
+	)
+
 	offset := 0
 
-	// VuIdentificationRecordArray
-	size, sizeErr := sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("VuIdentificationRecordArray: %w", sizeErr)
-	}
-	offset += size
+	// First prefer the standards-compliant layout. RecordType 0x08 is Signature.
+	// We do not assume a fixed ECC signature byte length here because it depends
+	// on the curve; the RecordArray header already declares the record size.
+	for index := 0; index < maxSpecArrays; index++ {
+		recordType, recordSize, noOfRecords, _, headerErr := parseRecordArrayHeader(data, offset)
+		if headerErr != nil {
+			break
+		}
 
-	// SensorPairedRecordArray
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("SensorPairedRecordArray: %w", sizeErr)
-	}
-	offset += size
+		size, sizeErr := sizeOfRecordArray(data, offset)
+		if sizeErr != nil {
+			return 0, 0, fmt.Errorf("TechnicalData RecordArray index=%d: %w", index, sizeErr)
+		}
+		if size < 5 || offset+size > len(data) {
+			return 0, 0, fmt.Errorf(
+				"TechnicalData RecordArray index=%d exceeds input: offset=%d size=%d len=%d",
+				index,
+				offset,
+				size,
+				len(data),
+			)
+		}
 
-	// SensorExternalGNSSCoupledRecordArray (Gen2 V2+)
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("SensorExternalGNSSCoupledRecordArray: %w", sizeErr)
-	}
-	offset += size
+		if recordType == signatureRecordType {
+			// Real downloads contain one signature. Allow an empty placeholder too,
+			// because anonymized/generated test material may omit the signature bytes.
+			if noOfRecords != 1 && !(noOfRecords == 0 && recordSize == 0) {
+				return 0, 0, fmt.Errorf(
+					"SignatureRecordArray has invalid record count %d",
+					noOfRecords,
+				)
+			}
+			return offset + size, size, nil
+		}
 
-	// VuCalibrationRecordArray
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("VuCalibrationRecordArray: %w", sizeErr)
+		offset += size
 	}
-	offset += size
 
-	// VuITSConsentRecordArray (Gen2 V2+)
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("VuITSConsentRecordArray: %w", sizeErr)
+	// Compatibility fallback for the old tachograph-go v0.17.3 fixtures/model.
+	// V1 expected 4 arrays and V2 expected 7 arrays, with the last one treated as
+	// the signature even though those fixtures do not use RecordType 0x08.
+	offset = 0
+	lastSize := 0
+	for index := 0; index < legacyArrayCount; index++ {
+		size, sizeErr := sizeOfRecordArray(data, offset)
+		if sizeErr != nil {
+			return 0, 0, fmt.Errorf(
+				"legacy TechnicalData RecordArray index=%d: %w",
+				index,
+				sizeErr,
+			)
+		}
+		if size < 5 || offset+size > len(data) {
+			return 0, 0, fmt.Errorf(
+				"legacy TechnicalData RecordArray index=%d exceeds input: offset=%d size=%d len=%d",
+				index,
+				offset,
+				size,
+				len(data),
+			)
+		}
+		lastSize = size
+		offset += size
 	}
-	offset += size
 
-	// VuPowerSupplyInterruptionRecordArray (Gen2 V2+)
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("VuPowerSupplyInterruptionRecordArray: %w", sizeErr)
-	}
-	offset += size
-
-	// SignatureRecordArray (last)
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("SignatureRecordArray: %w", sizeErr)
-	}
-	signatureSizeGen2 := size
-	offset += size
-
-	return offset, signatureSizeGen2, nil
+	return offset, lastSize, nil
 }
 
 // AppendVuTechnicalData appends VU technical data to a buffer.
