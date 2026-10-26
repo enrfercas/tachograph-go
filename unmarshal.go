@@ -73,7 +73,15 @@ func (o UnmarshalOptions) Unmarshal(data []byte) (*tachographv1.RawFile, error) 
 		rawFile.SetCard(cardRaw)
 
 	default:
-		return nil, errors.New("unknown or unsupported file type")
+		// ICC/IC are optional under DDP_035. A complete, unambiguous DRIVER
+		// Application_Identification is evidence of CARD even without MF EFs.
+		// The VU prefix above retains priority; malformed TLV is never guessed.
+		cardRaw, err := o.card().UnmarshalRawCardFile(data)
+		if err != nil || !card.HasDriverApplicationEvidence(cardRaw) {
+			return nil, errors.New("unknown or unsupported file type")
+		}
+		rawFile.SetType(tachographv1.RawFile_CARD)
+		rawFile.SetCard(cardRaw)
 	}
 
 	return &rawFile, nil

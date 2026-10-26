@@ -19,29 +19,9 @@ import (
 //	    cardBorderCrossingRecords SET SIZE (NoOfBorderCrossingRecords) OF CardBorderCrossingRecord
 //	}
 //
-// Binary Layout:
-//   - Byte 0: borderCrossingPointerNewestRecord (1 byte)
-//   - Bytes 1..N: Array of CardBorderCrossingRecord (17 bytes each)
-//
-// Note: The pointer is 1 byte in Gen2v2 (unlike 2 bytes for some other EFs in Gen2).
-// Verification: Annex 1C 2.11a says `INTEGER (0..NoOfBorderCrossingRecords -1)`.
-// `NoOfBorderCrossingRecords` is defined as a small number (typically < 255).
-// Let's double check the regulation or infer from other EFs.
-// Most pointers in driver cards are 2 bytes (Short). However, PlaceRecord pointers are 1 byte in Gen1.
-// In Gen2, indices are often 2 bytes.
-//
-// WAIT: The regulation says `INTEGER (0..NoOfBorderCrossingRecords -1)`.
-// If `NoOfBorderCrossingRecords` > 255, it must be 2 bytes.
-// Driver Card `NoOfBorderCrossingRecords` is likely small.
-// Let's assume 1 byte for now based on similar Gen1 structures, BUT Gen2 generally moved to 2-byte indices.
-//
-// Let's look at `EF_Places` (Gen1): 1 byte index.
-// Let's look at `EF_GNSS_Places` (Gen2): 2 byte index.
-//
-// Let's assume 1 byte for now, but be ready to correct.
-// Actually, let's check `internal/dd/card_border_crossing_record.go` size. It's 17 bytes.
-// If the total size is `1 + N*17`, we can check `(len-1) % 17 == 0`.
-// If `(len-2) % 17 == 0`, it's 2 bytes.
+// Normative G2V2 layout: uint16 BE pointer followed by 17-byte records.
+// Historical one-byte fixtures remain readable here. ValidateCompleteDownload
+// requires the normative layout and exact advertised capacity before publication.
 func (opts UnmarshalOptions) unmarshalBorderCrossings(data []byte) (*cardv1.BorderCrossings, error) {
 	const (
 		lenRecord = 17
@@ -63,14 +43,7 @@ func (opts UnmarshalOptions) unmarshalBorderCrossings(data []byte) (*cardv1.Bord
 	} else if rem2 == 0 && rem1 != 0 {
 		pointerSize = 2
 	} else {
-		// Ambiguous or invalid (e.g. empty records)
-		// Default to 1 byte as per standard ASN.1 INTEGER implicit sizing for small values,
-		// but Tachograph usually uses fixed sizes.
-		// Let's assume 1 byte if consistent with typical cyclic buffer pointers for small arrays.
-		// However, standard Gen2 pointers are often 2 bytes.
-		// Let's pick 1 byte as a starting point, matching Gen1 Places.
-		// If the file is 0 bytes, it returns error above.
-		// If len(data) is just the pointer (no records), e.g. 1 byte or 2 bytes.
+		// Empty historical buffers may consist of just their pointer.
 		if len(data) == 1 {
 			pointerSize = 1
 		} else if len(data) == 2 {
@@ -124,24 +97,11 @@ func (opts MarshalOptions) MarshalCardBorderCrossings(msg *cardv1.BorderCrossing
 		return nil, nil
 	}
 
-	// Determine pointer size logic (inverse of unmarshal).
-	// For now, we will write 1 byte if index < 255, but strictly we should follow the spec.
-	// We'll default to 1 byte for consistency with the unmarshaler's primary guess.
-	// If we find out it's 2 bytes, we'll update both.
-	
-	var data []byte
-	
-	newestRecordIndex := msg.GetNewestRecordIndex()
-	// Write pointer (1 byte assumption)
-	// TODO: verify if it should be 2 bytes
-	if newestRecordIndex > 255 {
-		// Must be 2 bytes if larger
-		buf := make([]byte, 2)
-		binary.BigEndian.PutUint16(buf, uint16(newestRecordIndex))
-		data = append(data, buf...)
-	} else {
-		data = append(data, byte(newestRecordIndex))
+	index := msg.GetNewestRecordIndex()
+	if index < 0 || index > 65535 {
+		return nil, fmt.Errorf("border pointer outside uint16 range")
 	}
+	data := binary.BigEndian.AppendUint16(nil, uint16(index))
 
 	for _, record := range msg.GetRecords() {
 		ddRecord := &ddv1.CardBorderCrossingRecord{}
@@ -149,7 +109,7 @@ func (opts MarshalOptions) MarshalCardBorderCrossings(msg *cardv1.BorderCrossing
 		ddRecord.SetCountryEntered(record.GetCountryEntered())
 		ddRecord.SetGnssPlaceAuthRecord(record.GetGnssPlaceAuthRecord())
 		ddRecord.SetVehicleOdometerKm(record.GetVehicleOdometerKm())
-		
+
 		bytes, err := opts.MarshalCardBorderCrossingRecord(ddRecord)
 		if err != nil {
 			return nil, err

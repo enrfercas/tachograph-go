@@ -66,7 +66,9 @@ func VerifyEccDataSignature(data, signature []byte, cardCert *securityv1.EccCert
 
 	// Parse signature (plain format: r || s)
 	// Each component is the same size as the curve's field size in bytes
-	curveBytes := (hashBits + 7) / 8 // Convert bits to bytes, round up
+	// P-521 uses SHA-512 but each signature component occupies 66 bytes.
+	// Hash width and elliptic-curve field width are distinct quantities.
+	curveBytes := (curve.Params().BitSize + 7) / 8
 	if len(signature) != curveBytes*2 {
 		return fmt.Errorf("invalid signature length: got %d, want %d", len(signature), curveBytes*2)
 	}
@@ -87,9 +89,8 @@ func VerifyEccDataSignature(data, signature []byte, cardCert *securityv1.EccCert
 	// Verify ECDSA signature
 	valid := ecdsa.Verify(cardPub, hash, r, s)
 	if !valid {
-		return fmt.Errorf("ECDSA signature verification failed")
+		return &InvalidSignatureError{}
 	}
 
 	return nil
 }
-

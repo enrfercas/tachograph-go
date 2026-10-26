@@ -15,6 +15,8 @@ import (
 func (opts UnmarshalOptions) UnmarshalRawCardFile(input []byte) (*cardv1.RawCardFile, error) {
 	var output cardv1.RawCardFile
 	sc := bufio.NewScanner(bytes.NewReader(input))
+	// A TLV value can exceed Scanner's default 64 KiB once its header is added.
+	sc.Buffer(make([]byte, 4096), 65535+5+1)
 	sc.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		return scanCardFile(data, atEOF, opts.Strict)
 	})

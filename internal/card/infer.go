@@ -24,6 +24,34 @@ func InferFileType(input *cardv1.RawCardFile) cardv1.CardType {
 	return cardv1.CardType_CARD_TYPE_UNSPECIFIED
 }
 
+// HasDriverApplicationEvidence recognizes only known DRIVER layouts/versions.
+// Conflicting card types or duplicate application identities are ambiguous.
+func HasDriverApplicationEvidence(input *cardv1.RawCardFile) bool {
+	found := false
+	seen := map[int32]bool{}
+	for _, r := range input.GetRecords() {
+		if r.GetFile() != cardv1.ElementaryFileType_EF_APPLICATION_IDENTIFICATION || r.GetContentType() != cardv1.ContentType_DATA {
+			continue
+		}
+		b := r.GetValue()
+		tag := r.GetTag()
+		if seen[tag] {
+			return false
+		}
+		seen[tag] = true
+		if len(b) == 10 && tag&255 == 0 && b[0] == 1 && b[1] == 0 && b[2] == 0 {
+			found = true
+			continue
+		}
+		if len(b) == 17 && tag&255 == 2 && b[0] == 1 && b[1] == 1 && (b[2] == 0 || b[2] == 1) {
+			found = true
+			continue
+		}
+		return false
+	}
+	return found
+}
+
 // mapFidToElementaryFileType maps a FID to its ElementaryFileType using protobuf annotations.
 // Returns the file type and true if found, or ELEMENTARY_FILE_UNSPECIFIED and false if not found.
 func mapFidToElementaryFileType(fid uint16, generation ddv1.Generation) (cardv1.ElementaryFileType, bool) {

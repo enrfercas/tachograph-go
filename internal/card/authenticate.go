@@ -73,7 +73,7 @@ func (opts AuthenticateOptions) authenticateGen1CardFile(ctx context.Context, ra
 	// Step 1: Extract certificates
 	cardCert, mscaCert, err := opts.extractGen1CardCertificates(rawFile)
 	if err != nil {
-		return fmt.Errorf("failed to extract Gen1 certificates: %w", err)
+		return authFailure("UNVERIFIED", "chain_incomplete", err)
 	}
 
 	// Step 2: Verify certificate chain
@@ -126,11 +126,11 @@ func (opts AuthenticateOptions) authenticateGen2CardFile(ctx context.Context, ra
 	// Step 1: Extract certificates
 	cardCert, mscaCert, err := opts.extractGen2CardCertificates(rawFile)
 	if err != nil {
-		return fmt.Errorf("failed to extract Gen2 certificates: %w", err)
+		return authFailure("UNVERIFIED", "chain_incomplete", err)
 	}
 
 	// Step 2: Verify certificate chain
-	if err := opts.verifyGen2CertificateChain(ctx, cardCert, mscaCert); err != nil {
+	if err := opts.verifyGen2CertificateChain(ctx, cardCert, mscaCert, rawFile); err != nil {
 		return fmt.Errorf("certificate chain verification failed: %w", err)
 	}
 
@@ -273,38 +273,77 @@ func (opts AuthenticateOptions) verifyGen1CertificateChain(ctx context.Context, 
 	// Get EUR root certificate
 	rootCert, err := opts.CertificateResolver.GetRootCertificate(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get root certificate: %w", err)
+		return authFailure("UNVERIFIED", "erca_material_unavailable", err)
+	}
+	if rootCert == nil || len(rootCert.GetRsaModulus()) == 0 || len(rootCert.GetRsaExponent()) == 0 {
+		return authFailure("UNVERIFIED", "erca_material_unavailable", nil)
+	}
+	if mscaCert.GetCertificateAuthorityReference() != rootCert.GetKeyId() {
+		return authFailure("UNVERIFIED", "unknown_trust_reference", nil)
 	}
 
 	// Verify MSCA certificate against EUR root
 	if err := security.VerifyRsaCertificateWithRoot(mscaCert, rootCert); err != nil {
-		return fmt.Errorf("MSCA certificate verification failed: %w", err)
+		return authFailure("INVALID", "certificate_signature_invalid", err)
+	}
+	if cardCert.GetCertificateAuthorityReference() != mscaCert.GetCertificateHolderReference() {
+		return authFailure("UNVERIFIED", "chain_incomplete", nil)
 	}
 
 	// Verify card certificate against MSCA
 	if err := security.VerifyRsaCertificateWithCA(cardCert, mscaCert); err != nil {
-		return fmt.Errorf("card certificate verification failed: %w", err)
+		return authFailure("INVALID", "certificate_signature_invalid", err)
 	}
 
 	return nil
 }
 
 // verifyGen2CertificateChain verifies the Gen2 certificate chain: EUR Root -> MSCA -> Card
-func (opts AuthenticateOptions) verifyGen2CertificateChain(ctx context.Context, cardCert *securityv1.EccCertificate, mscaCert *securityv1.EccCertificate) error {
+func (opts AuthenticateOptions) verifyGen2CertificateChain(ctx context.Context, cardCert *securityv1.EccCertificate, mscaCert *securityv1.EccCertificate, rawFile *cardv1.RawCardFile) error {
 	// Get Gen2 ECC root certificate
 	rootCert, err := opts.CertificateResolver.GetEccRootCertificate(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get Gen2 root certificate: %w", err)
+		return authFailure("UNVERIFIED", "erca_material_unavailable", err)
+	}
+	if rootCert == nil {
+		return authFailure("UNVERIFIED", "erca_material_unavailable", nil)
+	}
+	if cardCert == nil || mscaCert == nil {
+		return authFailure("UNVERIFIED", "chain_incomplete", nil)
+	}
+	if cardCert.GetCertificateAuthorityReference() != mscaCert.GetCertificateHolderReference() {
+		return authFailure("UNVERIFIED", "chain_incomplete", nil)
+	}
+	if mscaCert.GetCertificateAuthorityReference() != rootCert.GetCertificateHolderReference() {
+		// Root rollover requires the original C109 link, authenticated by the
+		// current trust anchor. A matching reference alone never grants trust.
+		var link *securityv1.EccCertificate
+		for _, record := range rawFile.GetRecords() {
+			if record.GetFile() == cardv1.ElementaryFileType_EF_LINK_CERTIFICATE && record.GetGeneration() == ddv1.Generation_GENERATION_2 && record.GetContentType() == cardv1.ContentType_DATA {
+				link, err = security.UnmarshalEccCertificate(record.GetValue())
+				if err != nil {
+					return authFailure("UNVERIFIED", "chain_incomplete", err)
+				}
+				break
+			}
+		}
+		if link == nil || link.GetCertificateAuthorityReference() != rootCert.GetCertificateHolderReference() || link.GetCertificateHolderReference() != mscaCert.GetCertificateAuthorityReference() {
+			return authFailure("UNVERIFIED", "unknown_trust_reference", nil)
+		}
+		if err := security.VerifyEccCertificateWithEccRoot(link, rootCert); err != nil {
+			return signatureFailure("root_link_signature_invalid", err)
+		}
+		rootCert = link
 	}
 
 	// Verify MSCA certificate against EUR Gen2 root (both ECC)
 	if err := security.VerifyEccCertificateWithEccRoot(mscaCert, rootCert); err != nil {
-		return fmt.Errorf("MSCA certificate verification failed: %w", err)
+		return signatureFailure("certificate_signature_invalid", err)
 	}
 
 	// Verify card certificate against MSCA
 	if err := security.VerifyEccCertificateWithCA(cardCert, mscaCert); err != nil {
-		return fmt.Errorf("card certificate verification failed: %w", err)
+		return signatureFailure("certificate_signature_invalid", err)
 	}
 
 	return nil
@@ -316,8 +355,7 @@ func (opts AuthenticateOptions) authenticateGen1EF(dataRecord *cardv1.RawCardFil
 	dataRecord.SetAuthentication(auth)
 
 	if signatureRecord == nil {
-		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-		return fmt.Errorf("signature record not found for EF %v", dataRecord.GetFile())
+		return authFailure("MISSING", "required_signature_missing", nil)
 	}
 
 	// Verify the signature using PKCS#1 v1.5
@@ -325,8 +363,12 @@ func (opts AuthenticateOptions) authenticateGen1EF(dataRecord *cardv1.RawCardFil
 	signature := signatureRecord.GetValue()
 
 	if err := security.VerifyRsaDataSignature(data, signature, cardCert); err != nil {
-		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-		return fmt.Errorf("signature verification failed for EF %v: %w", dataRecord.GetFile(), err)
+		failure := signatureFailure("data_signature_invalid", err)
+		var assessment *AuthenticationFailure
+		if errors.As(failure, &assessment) && assessment.Status == "INVALID" {
+			auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
+		}
+		return failure
 	}
 
 	// Authentication succeeded
@@ -342,8 +384,7 @@ func (opts AuthenticateOptions) authenticateGen2EF(dataRecord *cardv1.RawCardFil
 	dataRecord.SetAuthentication(auth)
 
 	if signatureRecord == nil {
-		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-		return fmt.Errorf("signature record not found for EF %v", dataRecord.GetFile())
+		return authFailure("MISSING", "required_signature_missing", nil)
 	}
 
 	// Verify the signature using ECDSA
@@ -351,8 +392,12 @@ func (opts AuthenticateOptions) authenticateGen2EF(dataRecord *cardv1.RawCardFil
 	signature := signatureRecord.GetValue()
 
 	if err := security.VerifyEccDataSignature(data, signature, cardCert); err != nil {
-		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-		return fmt.Errorf("signature verification failed for EF %v: %w", dataRecord.GetFile(), err)
+		failure := signatureFailure("data_signature_invalid", err)
+		var assessment *AuthenticationFailure
+		if errors.As(failure, &assessment) && assessment.Status == "INVALID" {
+			auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
+		}
+		return failure
 	}
 
 	// Determine signature algorithm based on curve

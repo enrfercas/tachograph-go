@@ -115,7 +115,7 @@ func VerifyEccCertificateWithEccRoot(cert, root *securityv1.EccCertificate) erro
 
 	// Verify ECDSA signature
 	if !ecdsa.Verify(ecdsaPub, hash, r, s) {
-		return fmt.Errorf("ECDSA certificate signature verification failed")
+		return &InvalidSignatureError{}
 	}
 
 	return nil
@@ -156,8 +156,8 @@ func parseCurveOID(oid string) (hashBits int, curve elliptic.Curve, err error) {
 	case "1.3.36.3.3.2.8.1.1.13": // brainpoolP512r1
 		return 512, brainpool.P512r1(), nil
 	case "1.3.132.0.35": // NIST P-521 (secp521r1)
-		return 521, elliptic.P521(), nil
+		return 512, elliptic.P521(), nil // SHA-512; field width remains 521 bits.
 	default:
-		return 0, nil, fmt.Errorf("unsupported curve OID: %s", oid)
+		return 0, nil, &UnsupportedAlgorithmError{OID: oid}
 	}
 }

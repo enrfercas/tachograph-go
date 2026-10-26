@@ -19,6 +19,9 @@ func (opts MarshalOptions) MarshalDriverCardFile(file *cardv1.DriverCardFile) ([
 	if file == nil {
 		return nil, fmt.Errorf("driver card file is nil")
 	}
+	if g2 := file.GetTachographG2(); g2 != nil && (g2.GetPlacesAuthentication() != nil || g2.GetGnssPlacesAuthentication() != nil || g2.GetBorderCrossings() != nil || g2.GetLoadUnloadOperations() != nil || g2.GetLoadTypeEntries() != nil || g2.GetVuConfiguration() != nil) {
+		return nil, fmt.Errorf("G2V2 EFs require original RawCardFile for lossless signed output; semantic protobuf lacks signature fields")
+	}
 
 	// Allocate a buffer large enough for the card file
 	buf := make([]byte, 0, 1024*1024) // 1MB initial capacity
@@ -537,8 +540,63 @@ func (opts ParseOptions) ParseRawDriverCardFile(input *cardv1.RawCardFile) (*car
 			}
 			tachographG2DF.SetGnssPlaces(gnssPlaces)
 
+		case cardv1.ElementaryFileType_EF_PLACES_AUTHENTICATION,
+			cardv1.ElementaryFileType_EF_GNSS_PLACES_AUTHENTICATION,
+			cardv1.ElementaryFileType_EF_BORDER_CROSSINGS,
+			cardv1.ElementaryFileType_EF_LOAD_UNLOAD_OPERATIONS,
+			cardv1.ElementaryFileType_EF_LOAD_TYPE_ENTRIES,
+			cardv1.ElementaryFileType_EF_VU_CONFIGURATION:
+			if efGeneration != ddv1.Generation_GENERATION_2 {
+				return nil, fmt.Errorf("G2V2 EF outside Tachograph_G2 DF")
+			}
+			if tachographG2DF == nil {
+				tachographG2DF = &cardv1.DriverCardFile_TachographG2{}
+			}
+			var err error
+			switch record.GetFile() {
+			case cardv1.ElementaryFileType_EF_PLACES_AUTHENTICATION:
+				v, e := unmarshalOpts.unmarshalPlacesAuthentication(record.GetValue())
+				err = e
+				tachographG2DF.SetPlacesAuthentication(v)
+			case cardv1.ElementaryFileType_EF_GNSS_PLACES_AUTHENTICATION:
+				v, e := unmarshalOpts.unmarshalGnssPlacesAuthentication(record.GetValue())
+				err = e
+				tachographG2DF.SetGnssPlacesAuthentication(v)
+			case cardv1.ElementaryFileType_EF_BORDER_CROSSINGS:
+				v, e := unmarshalOpts.unmarshalBorderCrossings(record.GetValue())
+				err = e
+				tachographG2DF.SetBorderCrossings(v)
+			case cardv1.ElementaryFileType_EF_LOAD_UNLOAD_OPERATIONS:
+				v, e := unmarshalOpts.unmarshalLoadUnloadOperations(record.GetValue())
+				err = e
+				tachographG2DF.SetLoadUnloadOperations(v)
+			case cardv1.ElementaryFileType_EF_LOAD_TYPE_ENTRIES:
+				v, e := unmarshalOpts.unmarshalLoadTypeEntries(record.GetValue())
+				err = e
+				tachographG2DF.SetLoadTypeEntries(v)
+			case cardv1.ElementaryFileType_EF_VU_CONFIGURATION:
+				v := &cardv1.VuConfiguration{}
+				v.SetRawData(append([]byte(nil), record.GetValue()...))
+				tachographG2DF.SetVuConfiguration(v)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", record.GetFile(), err)
+			}
+
 		case cardv1.ElementaryFileType_EF_APPLICATION_IDENTIFICATION_V2:
-			appIdV2, err := unmarshalOpts.unmarshalApplicationIdentificationV2(record.GetValue())
+			if efGeneration != ddv1.Generation_GENERATION_2 {
+				return nil, fmt.Errorf("Application_Identification_V2 outside Tachograph_G2 DF")
+			}
+			var cardType cardv1.CardType
+			for _, source := range input.GetRecords() {
+				if source.GetFile() == cardv1.ElementaryFileType_EF_APPLICATION_IDENTIFICATION && source.GetGeneration() == efGeneration && source.GetContentType() == cardv1.ContentType_DATA && len(source.GetValue()) > 0 {
+					if source.GetValue()[0] != 1 {
+						return nil, fmt.Errorf("non-DRIVER Application_Identification in driver card parser")
+					}
+					cardType = cardv1.CardType_DRIVER_CARD
+				}
+			}
+			appIdV2, err := unmarshalOpts.unmarshalApplicationIdentificationV2(record.GetValue(), cardType)
 			if err != nil {
 				return nil, err
 			}
