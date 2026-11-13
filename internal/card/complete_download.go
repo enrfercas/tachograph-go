@@ -14,6 +14,10 @@ import (
 // expected is the generation observed on the physical card, not inferred from
 // a potentially legacy-only DDD (MIG_012). Unknown versions/EFs fail closed.
 func ValidateCompleteDownload(raw *cardv1.RawCardFile, expected string) error {
+	return validateDownloadStructure(raw, expected, true, false)
+}
+
+func validateDownloadStructure(raw *cardv1.RawCardFile, expected string, requireLink, historical bool) error {
 	if expected != "G1" && expected != "G2V1" && expected != "G2V2" {
 		return &DownloadStructureError{Unsupported: true, Reason: "generation_unsupported"}
 	}
@@ -67,7 +71,6 @@ func ValidateCompleteDownload(raw *cardv1.RawCardFile, expected string) error {
 			}
 		}
 	}
-	base := []int{0x0501, 0x0520, 0x0502, 0x0503, 0x0504, 0x0505, 0x0506, 0x0508, 0x0522}
 	for _, appendix := range []int{0, 2} {
 		if appendix == 2 && expected == "G1" {
 			for tag := range files {
@@ -99,12 +102,8 @@ func ValidateCompleteDownload(raw *cardv1.RawCardFile, expected string) error {
 		} else if app[1] != 0 || app[2] != 0 {
 			return fmt.Errorf("unknown G1 cardStructureVersion")
 		}
-		required := append([]int(nil), base...)
-		certs := []int{0xc100, 0xc108}
-		if appendix == 2 {
-			required = append(required, 0x0523, 0x0524)
-			certs = []int{0xc101, 0xc108, 0xc109}
-		}
+		required := RequiredDownloadData(appendix)
+		certs := RequiredDownloadCertificates(appendix, requireLink)
 		for _, fid := range append(required, certs...) {
 			if _, err := require(fid, appendix); err != nil {
 				return err
@@ -116,6 +115,9 @@ func ValidateCompleteDownload(raw *cardv1.RawCardFile, expected string) error {
 			}
 			fid := tag >> 8
 			allowed := fid == 2 || fid == 5 || fid == 0x0507 || fid == 0x0521
+			if historical && (fid == 0x050e || appendix == 2 && fid == 0xc109) {
+				continue
+			}
 			for _, f := range append(append([]int(nil), required...), certs...) {
 				allowed = allowed || fid == f
 			}

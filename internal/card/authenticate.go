@@ -46,6 +46,13 @@ func (opts AuthenticateOptions) AuthenticateRawCardFile(ctx context.Context, raw
 	hasGen1, hasGen2 := opts.detectGenerations(rawFile)
 
 	var errs []error
+	profile := ResolveDownloadProfile(rawFile, "", false)
+	for _, defect := range InspectInventory(rawFile, profile, nil) {
+		errs = append(errs, defect)
+	}
+	if !profile.Determined {
+		errs = append(errs, authFailure("UNVERIFIED", "download_profile_undetermined", nil))
+	}
 
 	// Authenticate Gen1 data if present
 	if hasGen1 {

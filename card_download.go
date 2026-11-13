@@ -13,6 +13,7 @@ import (
 // CardDownloadValidation is a versioned gate for a newly acquired PC/SC file.
 // It never reports success from the analyzer's historical fallback path.
 type CardDownloadValidation struct {
+	Inspection           *CardFileInspection           `json:"inspection,omitempty"`
 	Contract             string                        `json:"contract"`
 	Generation           string                        `json:"generation"`
 	SHA256               string                        `json:"sha256"`
@@ -82,6 +83,7 @@ type CardDownloadValidationOptions struct {
 func (o CardDownloadValidationOptions) Validate(ctx context.Context, input []byte) (*CardDownloadValidation, error) {
 	sum := sha256.Sum256(input)
 	result := &CardDownloadValidation{Contract: "pcsc-card-3/v1", Profile: "APPENDIX_7_DRIVER", Generation: o.ExpectedGeneration, SHA256: hex.EncodeToString(sum[:]), AcquisitionStatus: AcquisitionIncomplete, StructuralStatus: StructureInvalid, AuthenticityStatus: AuthenticityUnverified, Cryptography: "unverified", PhysicalCompleteness: "NOT_ASSESSED", Observations: []CardDownloadEFObservation{}, Issues: []CardDownloadValidationIssue{}}
+	result.Inspection = (CardInspectionOptions{ExpectedGeneration: o.ExpectedGeneration, ObservedCard: true, CertificateResolver: o.CertificateResolver}).Inspect(ctx, input)
 	rawCard, err := card.UnmarshalOptions{}.UnmarshalRawCardFile(input)
 	if err != nil {
 		result.Issues = append(result.Issues, CardDownloadValidationIssue{Scope: "structure", Code: "tlv_truncated_or_invalid"})
@@ -174,15 +176,10 @@ func (o CardDownloadValidationOptions) observeFiles(raw *cardv1.RawCardFile) []C
 		if app == 2 && o.ExpectedGeneration == "G1" {
 			break
 		}
-		for _, fid := range []int{0x0501, 0x0520, 0x0502, 0x0503, 0x0504, 0x0505, 0x0506, 0x0508, 0x0522, 0xc108} {
+		for _, fid := range append(card.RequiredDownloadData(app), card.RequiredDownloadCertificates(app, true)...) {
 			add(fid, app, "REQUIRED", false)
 		}
-		if app == 0 {
-			add(0xc100, 0, "REQUIRED", false)
-		} else {
-			for _, fid := range []int{0xc101, 0xc109, 0x0523, 0x0524} {
-				add(fid, 2, "REQUIRED", false)
-			}
+		if app == 2 {
 			add(0xc100, 2, "IF_PRESENT", false)
 			for _, fid := range []int{0x0525, 0x0526, 0x0527, 0x0528, 0x0529, 0x0530} {
 				add(fid, 2, "IF_PRESENT", o.ExpectedGeneration == "G2V2")
