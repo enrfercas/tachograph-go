@@ -48,14 +48,19 @@ type DownloadInspection struct {
 	StoppedOffset        *int              `json:"stoppedOffset,omitempty"`
 	// Container provenance is supplied only by the containing application's
 	// verified extraction routine. Payload bytes are never diagnostic log text.
-	ContainerSHA256           string `json:"containerSha256,omitempty"`
-	ContainerOffset           *int   `json:"containerOffset,omitempty"`
-	ContainerExtractionFormat string `json:"containerExtractionFormat,omitempty"`
-	EmbeddedPayload           []byte `json:"embeddedPayload,omitempty"`
+	ContainerSHA256           string                  `json:"containerSha256,omitempty"`
+	ContainerOffset           *int                    `json:"containerOffset,omitempty"`
+	ContainerExtractionFormat string                  `json:"containerExtractionFormat,omitempty"`
+	EmbeddedPayload           []byte                  `json:"embeddedPayload,omitempty"`
+	AuthenticationEvidence    *AuthenticationEvidence `json:"authenticationEvidence,omitempty"`
 }
 
 func (i *DownloadInspection) Rejected() bool {
 	return len(i.AcceptanceStatus) >= 8 && i.AcceptanceStatus[:8] == "INVALID_"
+}
+
+func (i *DownloadInspection) HasOnlyUnevaluatedTime() bool {
+	return i != nil && i.AcceptanceStatus == "UNVERIFIED" && i.InventoryStatus == "COMPLETE" && i.StructuralStatus == "VALID" && i.AuthenticationEvidence != nil && i.SHA256 == i.AuthenticationEvidence.SHA256 && i.AuthenticationEvidence.HasOnlyUnevaluatedTime()
 }
 
 type InspectionOptions struct {
@@ -190,6 +195,7 @@ func (o InspectionOptions) InspectDownload(ctx context.Context, input []byte) *D
 		}
 	}
 	assessment := safeDownloadAssessment(ctx, o.AuthenticateOptions, raw)
+	r.AuthenticationEvidence = assessment.Evidence
 	r.AuthenticityStatus = assessment.Status
 	for _, issue := range assessment.Issues {
 		r.Defects = append(r.Defects, InventoryDefect{Code: issue.Reason, Scope: "authenticity", Application: issue.Application, Reason: issue.Status})
@@ -220,6 +226,15 @@ func (o InspectionOptions) InspectDownload(ctx context.Context, input []byte) *D
 				b.Reason = d.Code
 			}
 		}
+		if b.CryptographicStatus == "NOT_EVALUATED" && assessment.Evidence != nil {
+			for _, app := range assessment.Evidence.Applications {
+				for _, tag := range app.CoveredTags {
+					if tag == b.Tag {
+						b.CryptographicStatus = "SIGNATURE_VALID"
+					}
+				}
+			}
+		}
 	}
 	if o.ObservedCard {
 		r.PhysicalCompleteness = "OBSERVED_PROFILE"
@@ -248,6 +263,13 @@ func (o InspectionOptions) InspectDownload(ctx context.Context, input []byte) *D
 		r.AcceptanceStatus = "VALID"
 	default:
 		r.AcceptanceStatus = "UNVERIFIED"
+	}
+	if r.AuthenticationEvidence != nil && r.AcceptanceStatus != "VALID" && r.AuthenticationEvidence.Status == "VERIFIED" {
+		r.AuthenticationEvidence.Status = "UNVERIFIED"
+	}
+	// Whole-file cryptographic proof also requires F01 structure/inventory.
+	if r.AuthenticationEvidence != nil && (r.StructuralStatus != "VALID" || r.InventoryStatus != "COMPLETE" || !r.Profile.Determined || hasUncertainty(r.Defects)) && r.AuthenticationEvidence.CryptographicStatus == "VERIFIED" {
+		r.AuthenticationEvidence.CryptographicStatus = "UNVERIFIED"
 	}
 	return r
 }

@@ -16,6 +16,10 @@ import (
 type AuthenticateOptions struct {
 	// CertificateResolver is used to resolve CA certificates by their Certificate Authority Reference (CAR).
 	CertificateResolver cert.Resolver
+	TemporalEvidence    *TemporalEvidence
+	evidence            *AuthenticationEvidence
+	temporalReason      string
+	dataSignatures      map[int]string
 }
 
 // AuthenticateRawCardFile performs cryptographic authentication on all signed Elementary Files
@@ -40,6 +44,11 @@ func (opts AuthenticateOptions) AuthenticateRawCardFile(ctx context.Context, raw
 	if opts.CertificateResolver == nil {
 		opts.CertificateResolver = cert.DefaultResolver()
 	}
+	encoded, marshalErr := (MarshalOptions{}).MarshalRawCardFile(rawFile)
+	if marshalErr != nil {
+		return marshalErr
+	}
+	opts = opts.bindTime(digest(encoded))
 
 	// Check which generations are present in the file
 	// Many cards have both Gen1 and Gen2 data for backward compatibility
@@ -77,6 +86,7 @@ func (opts AuthenticateOptions) AuthenticateRawCardFile(ctx context.Context, raw
 
 // authenticateGen1CardFile authenticates a Generation 1 card file using RSA signature recovery.
 func (opts AuthenticateOptions) authenticateGen1CardFile(ctx context.Context, rawFile *cardv1.RawCardFile) error {
+	clearApplicationAuthentication(rawFile, ddv1.Generation_GENERATION_1)
 	// Step 1: Extract certificates
 	cardCert, mscaCert, err := opts.extractGen1CardCertificates(rawFile)
 	if err != nil {
@@ -84,12 +94,15 @@ func (opts AuthenticateOptions) authenticateGen1CardFile(ctx context.Context, ra
 	}
 
 	// Step 2: Verify certificate chain
-	if err := opts.verifyGen1CertificateChain(ctx, cardCert, mscaCert); err != nil {
-		return fmt.Errorf("certificate chain verification failed: %w", err)
+	chainErr := opts.verifyGen1CertificateChain(ctx, cardCert, mscaCert)
+	var policy *policyFailure
+	if chainErr != nil && !errors.As(chainErr, &policy) {
+		return fmt.Errorf("certificate chain verification failed: %w", chainErr)
 	}
 
 	// Step 3: Authenticate each signed EF
 	var errs []error
+	errs = append(errs, chainErr)
 	records := rawFile.GetRecords()
 
 	for i := 0; i < len(records); i++ {
@@ -125,11 +138,13 @@ func (opts AuthenticateOptions) authenticateGen1CardFile(ctx context.Context, ra
 		}
 	}
 
+	opts.finishApplication(rawFile, ddv1.Generation_GENERATION_1, chainErr)
 	return errors.Join(errs...)
 }
 
 // authenticateGen2CardFile authenticates a Generation 2 card file using ECDSA signature verification.
 func (opts AuthenticateOptions) authenticateGen2CardFile(ctx context.Context, rawFile *cardv1.RawCardFile) error {
+	clearApplicationAuthentication(rawFile, ddv1.Generation_GENERATION_2)
 	// Step 1: Extract certificates
 	cardCert, mscaCert, err := opts.extractGen2CardCertificates(rawFile)
 	if err != nil {
@@ -137,12 +152,15 @@ func (opts AuthenticateOptions) authenticateGen2CardFile(ctx context.Context, ra
 	}
 
 	// Step 2: Verify certificate chain
-	if err := opts.verifyGen2CertificateChain(ctx, cardCert, mscaCert, rawFile); err != nil {
-		return fmt.Errorf("certificate chain verification failed: %w", err)
+	chainErr := opts.verifyGen2CertificateChain(ctx, cardCert, mscaCert, rawFile)
+	var policy *policyFailure
+	if chainErr != nil && !errors.As(chainErr, &policy) {
+		return fmt.Errorf("certificate chain verification failed: %w", chainErr)
 	}
 
 	// Step 3: Authenticate each signed EF
 	var errs []error
+	errs = append(errs, chainErr)
 	records := rawFile.GetRecords()
 
 	for i := 0; i < len(records); i++ {
@@ -178,7 +196,38 @@ func (opts AuthenticateOptions) authenticateGen2CardFile(ctx context.Context, ra
 		}
 	}
 
+	opts.finishApplication(rawFile, ddv1.Generation_GENERATION_2, chainErr)
 	return errors.Join(errs...)
+}
+
+func clearApplicationAuthentication(raw *cardv1.RawCardFile, generation ddv1.Generation) {
+	for _, record := range raw.GetRecords() {
+		if record.GetGeneration() == generation {
+			record.SetAuthentication(nil)
+		}
+	}
+}
+
+// The existing protobuf VERIFIED means full authentication. Keep mathematical
+// successes in the additive evidence when certificate policy is unresolved.
+func (opts AuthenticateOptions) finishApplication(raw *cardv1.RawCardFile, generation ddv1.Generation, policyErr error) {
+	for _, record := range raw.GetRecords() {
+		if record.GetGeneration() != generation || record.GetAuthentication() == nil {
+			continue
+		}
+		status := record.GetAuthentication().GetStatus()
+		if opts.dataSignatures != nil {
+			if status == securityv1.Authentication_VERIFIED {
+				opts.dataSignatures[int(record.GetTag())] = "VALID"
+			}
+			if status == securityv1.Authentication_DATA_SIGNATURE_INVALID {
+				opts.dataSignatures[int(record.GetTag())] = "INVALID"
+			}
+		}
+		if policyErr != nil && status == securityv1.Authentication_VERIFIED {
+			record.SetAuthentication(nil)
+		}
+	}
 }
 
 // detectGenerations checks which generations are present in the card file.
@@ -252,13 +301,13 @@ func (opts AuthenticateOptions) extractGen2CardCertificates(rawFile *cardv1.RawC
 
 		switch record.GetFile() {
 		case cardv1.ElementaryFileType_EF_CARD_SIGN_CERTIFICATE:
-			cardCert, err = security.UnmarshalEccCertificate(record.GetValue())
+			cardCert, err = unmarshalAuthenticationEccCertificate(record.GetValue())
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to parse card certificate: %w", err)
 			}
 
 		case cardv1.ElementaryFileType_EF_CA_CERTIFICATE:
-			mscaCert, err = security.UnmarshalEccCertificate(record.GetValue())
+			mscaCert, err = unmarshalAuthenticationEccCertificate(record.GetValue())
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to parse MSCA certificate: %w", err)
 			}
@@ -273,6 +322,15 @@ func (opts AuthenticateOptions) extractGen2CardCertificates(rawFile *cardv1.RawC
 	}
 
 	return cardCert, mscaCert, nil
+}
+
+// Reuse F01 framing checks at the raw authentication boundary too. A correctly
+// signed body inside an invalid CVC wrapper is not an authenticated certificate.
+func unmarshalAuthenticationEccCertificate(value []byte) (*securityv1.EccCertificate, error) {
+	if err := validateDownloadEccCertificate(value); err != nil {
+		return nil, err
+	}
+	return security.UnmarshalEccCertificate(value)
 }
 
 // verifyGen1CertificateChain verifies the Gen1 certificate chain: EUR Root -> MSCA -> Card
@@ -302,7 +360,10 @@ func (opts AuthenticateOptions) verifyGen1CertificateChain(ctx context.Context, 
 		return authFailure("INVALID", "certificate_signature_invalid", err)
 	}
 
-	return nil
+	return policyFailures(
+		opts.checkRsa(mscaCert, rootCert.GetRsaModulus(), rootCert.GetRsaExponent(), rootCert.GetKeyId(), "MSCA", 0),
+		opts.checkRsa(cardCert, mscaCert.GetRsaModulus(), mscaCert.GetRsaExponent(), mscaCert.GetCertificateHolderReference(), "CARD", 1),
+	)
 }
 
 // verifyGen2CertificateChain verifies the Gen2 certificate chain: EUR Root -> MSCA -> Card
@@ -321,13 +382,15 @@ func (opts AuthenticateOptions) verifyGen2CertificateChain(ctx context.Context, 
 	if cardCert.GetCertificateAuthorityReference() != mscaCert.GetCertificateHolderReference() {
 		return authFailure("UNVERIFIED", "chain_incomplete", nil)
 	}
+	anchor := rootCert
+	var linkCert *securityv1.EccCertificate
 	if mscaCert.GetCertificateAuthorityReference() != rootCert.GetCertificateHolderReference() {
 		// Root rollover requires the original C109 link, authenticated by the
 		// current trust anchor. A matching reference alone never grants trust.
 		var link *securityv1.EccCertificate
 		for _, record := range rawFile.GetRecords() {
 			if record.GetFile() == cardv1.ElementaryFileType_EF_LINK_CERTIFICATE && record.GetGeneration() == ddv1.Generation_GENERATION_2 && record.GetContentType() == cardv1.ContentType_DATA {
-				link, err = security.UnmarshalEccCertificate(record.GetValue())
+				link, err = unmarshalAuthenticationEccCertificate(record.GetValue())
 				if err != nil {
 					return authFailure("UNVERIFIED", "chain_incomplete", err)
 				}
@@ -341,6 +404,7 @@ func (opts AuthenticateOptions) verifyGen2CertificateChain(ctx context.Context, 
 			return signatureFailure("root_link_signature_invalid", err)
 		}
 		rootCert = link
+		linkCert = link
 	}
 
 	// Verify MSCA certificate against EUR Gen2 root (both ECC)
@@ -353,7 +417,11 @@ func (opts AuthenticateOptions) verifyGen2CertificateChain(ctx context.Context, 
 		return signatureFailure("certificate_signature_invalid", err)
 	}
 
-	return nil
+	var linkErr error
+	if linkCert != nil {
+		linkErr = opts.checkEcc(linkCert, "ERCA_LINK", 0x0d)
+	}
+	return policyFailures(opts.checkEcc(anchor, "ERCA", 0x0d), linkErr, opts.checkEcc(mscaCert, "MSCA", 0x0e), opts.checkEcc(cardCert, "CARD_SIGN", 0x11))
 }
 
 // authenticateGen1EF authenticates a single Gen1 EF using RSA signature verification.

@@ -61,7 +61,7 @@ func TestAppendix7ConditionalEFsAndTrust(t *testing.T) {
 			}
 			input := f.Bytes()
 			original := bytes.Clone(input)
-			result, err := (CardDownloadValidationOptions{ExpectedGeneration: "G2V2", CertificateResolver: resolver, ObservedCard: true}).Validate(context.Background(), input)
+			result, err := (CardDownloadValidationOptions{ExpectedGeneration: "G2V2", CertificateResolver: resolver, ObservedCard: true, TemporalEvidence: cardTestTime(f)}).Validate(context.Background(), input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -105,7 +105,7 @@ func TestUnknownEFIsUnsupportedAndRetained(t *testing.T) {
 	if err != nil || !bytes.Equal(encoded, input) {
 		t.Fatal("unknown raw EF lost", err)
 	}
-	result, err := (CardDownloadValidationOptions{ExpectedGeneration: "G2V2", CertificateResolver: f}).Validate(context.Background(), input)
+	result, err := (CardDownloadValidationOptions{ExpectedGeneration: "G2V2", CertificateResolver: f, TemporalEvidence: cardTestTime(f)}).Validate(context.Background(), input)
 	if err != nil || result.StructuralStatus != StructureUnsupported || result.AuthenticityStatus == AuthenticityInvalid {
 		t.Fatal("unknown extension mislabeled as corruption", err)
 	}

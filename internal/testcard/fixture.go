@@ -28,6 +28,8 @@ type Fixture struct {
 	EccRoot    *securityv1.EccCertificate
 	Generation string
 	ecKey      *ecdsa.PrivateKey
+	rsaKey     *rsa.PrivateKey
+	issuers    map[int]*ecdsa.PrivateKey
 }
 
 func (f *Fixture) GetRootCertificate(context.Context) (*securityv1.RootCertificate, error) {
@@ -58,6 +60,8 @@ func NewWithCurve(generation string, curve elliptic.Curve) (*Fixture, error) {
 	}
 	f := &Fixture{Files: map[int][]byte{0x000200: make([]byte, 25), 0x000500: make([]byte, 8)}, Signatures: map[int][]byte{}, Generation: generation}
 	f.ecKey = ecKey
+	f.rsaKey = rsaKey
+	f.issuers = map[int]*ecdsa.PrivateKey{}
 	f.RsaRoot = &securityv1.RootCertificate{}
 	f.RsaRoot.SetKeyId("1")
 	f.RsaRoot.SetRsaModulus(rsaKey.N.Bytes())
@@ -157,10 +161,19 @@ func NewWithCurve(generation string, curve elliptic.Curve) (*Fixture, error) {
 }
 
 func rsaCertificate(key *rsa.PrivateKey, car, chr uint64) []byte {
+	cha := []byte{0xff, 0x54, 0x41, 0x43, 0x48, 0x4f, 0}
+	if chr == 3 {
+		cha[6] = 1
+	}
+	return rsaCertificateWithPolicy(key, car, chr, cha, 0xffffffff)
+}
+
+func rsaCertificateWithPolicy(key *rsa.PrivateKey, car, chr uint64, cha []byte, end uint32) []byte {
 	c := make([]byte, 164)
 	c[0] = 1
 	binary.BigEndian.PutUint64(c[1:], car)
-	binary.BigEndian.PutUint32(c[16:], 0xffffffff)
+	copy(c[9:16], cha)
+	binary.BigEndian.PutUint32(c[16:], end)
 	binary.BigEndian.PutUint64(c[20:], chr)
 	key.N.FillBytes(c[28:156])
 	binary.BigEndian.PutUint64(c[156:], uint64(key.E))
@@ -178,6 +191,17 @@ func eccCertificate(key *ecdsa.PrivateKey, car, chr uint64) []byte {
 }
 
 func eccCertificateForKey(publicKey *ecdsa.PublicKey, signer *ecdsa.PrivateKey, car, chr uint64) []byte {
+	role := byte(0x0d)
+	if chr == 2 {
+		role = 0x0e
+	}
+	if chr == 3 {
+		role = 0x11
+	}
+	return eccCertificateWithPolicy(publicKey, signer, car, chr, []byte{0xff, 0x53, 0x4d, 0x52, 0x44, 0x54, role}, 1, 2208988800)
+}
+
+func eccCertificateWithPolicy(publicKey *ecdsa.PublicKey, signer *ecdsa.PrivateKey, car, chr uint64, cha []byte, start, end uint32) []byte {
 	wrap := func(class, tag int, compound bool, b []byte) []byte {
 		out, err := asn1.Marshal(asn1.RawValue{Class: class, Tag: tag, IsCompound: compound, Bytes: b})
 		if err != nil {
@@ -188,7 +212,7 @@ func eccCertificateForKey(publicKey *ecdsa.PublicKey, signer *ecdsa.PrivateKey, 
 	field := func(tag int, b []byte) []byte { return wrap(asn1.ClassApplication, tag, false, b) }
 	body := field(41, []byte{0})
 	body = append(body, field(2, binary.BigEndian.AppendUint64(nil, car))...)
-	body = append(body, field(76, make([]byte, 7))...)
+	body = append(body, field(76, cha)...)
 	curveOID := asn1.ObjectIdentifier{1, 2, 840, 10045, 3, 1, 7}
 	switch publicKey.Params().BitSize {
 	case 384:
@@ -200,8 +224,8 @@ func eccCertificateForKey(publicKey *ecdsa.PublicKey, signer *ecdsa.PrivateKey, 
 	pk := append(oid, wrap(asn1.ClassContextSpecific, 6, false, elliptic.Marshal(publicKey.Curve, publicKey.X, publicKey.Y))...)
 	body = append(body, wrap(asn1.ClassApplication, 73, true, pk)...)
 	body = append(body, field(32, binary.BigEndian.AppendUint64(nil, chr))...)
-	body = append(body, field(37, []byte{0, 0, 0, 1})...)
-	body = append(body, field(36, []byte{0xff, 0xff, 0xff, 0xff})...)
+	body = append(body, field(37, binary.BigEndian.AppendUint32(nil, start))...)
+	body = append(body, field(36, binary.BigEndian.AppendUint32(nil, end))...)
 	body = wrap(asn1.ClassApplication, 78, true, body)
 	h := eccHash(signer, body)
 	r, s, err := ecdsa.Sign(rand.Reader, signer, h)
@@ -236,6 +260,69 @@ func (f *Fixture) RotateRoot() error {
 	}
 	f.Files[0xc10902] = eccCertificateForKey(&newKey.PublicKey, f.ecKey, 1, 4)
 	f.Files[0xc10802] = eccCertificateForKey(&f.ecKey.PublicKey, newKey, 4, 2)
+	f.issuers[0xc10802] = newKey
+	return nil
+}
+
+// ReissueCertificate changes signed policy fields, then signs with the test
+// issuer. Negative CHA tests therefore retain mathematically valid signatures.
+func (f *Fixture) ReissueCertificate(tag int, cha []byte, start, end uint32) error {
+	if tag&2 == 0 {
+		chr := uint64(1)
+		if tag == 0xc10000 {
+			chr = 3
+		}
+		f.Files[tag] = rsaCertificateWithPolicy(f.rsaKey, 1, chr, cha, end)
+		return nil
+	}
+	c, err := security.UnmarshalEccCertificate(f.Files[tag])
+	if err != nil {
+		return err
+	}
+	var car, chr uint64
+	if _, err := fmt.Sscan(c.GetCertificateAuthorityReference(), &car); err != nil {
+		return err
+	}
+	if _, err := fmt.Sscan(c.GetCertificateHolderReference(), &chr); err != nil {
+		return err
+	}
+	signer := f.ecKey
+	if key := f.issuers[tag]; key != nil {
+		signer = key
+	}
+	publicKey := &f.ecKey.PublicKey
+	if tag == 0xc10902 && f.issuers[0xc10802] != nil {
+		publicKey = &f.issuers[0xc10802].PublicKey
+	}
+	f.Files[tag] = eccCertificateWithPolicy(publicKey, signer, car, chr, cha, start, end)
+	return nil
+}
+
+// SetCardExpiry re-signs both Identification EFs after changing only the
+// administrative card expiry, independently of certificate expiration.
+func (f *Fixture) SetCardExpiry(seconds uint32) error {
+	for _, tag := range []int{0x052000, 0x052002} {
+		data, ok := f.Files[tag]
+		if !ok {
+			continue
+		}
+		binary.BigEndian.PutUint32(data[61:65], seconds)
+		if tag&2 == 0 {
+			h := sha1.Sum(data)
+			sig, err := rsa.SignPKCS1v15(rand.Reader, f.rsaKey, crypto.SHA1, h[:])
+			if err != nil {
+				return err
+			}
+			f.Signatures[tag] = sig
+		} else {
+			r, s, err := ecdsa.Sign(rand.Reader, f.ecKey, eccHash(f.ecKey, data))
+			if err != nil {
+				return err
+			}
+			width := (f.ecKey.Params().BitSize + 7) / 8
+			f.Signatures[tag] = append(r.FillBytes(make([]byte, width)), s.FillBytes(make([]byte, width))...)
+		}
+	}
 	return nil
 }
 

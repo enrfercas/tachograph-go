@@ -16,7 +16,7 @@ func TestCardInventoryEveryRequiredPairAndSignature(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		o := CardInspectionOptions{ExpectedGeneration: generation, ObservedCard: true, CertificateResolver: f}
+		o := CardInspectionOptions{ExpectedGeneration: generation, ObservedCard: true, CertificateResolver: f, TemporalEvidence: cardTestTime(f)}
 		if r := o.Inspect(context.Background(), f.Bytes()); r.AcceptanceStatus != "VALID" {
 			t.Fatalf("%s: %+v", generation, r.Defects)
 		}
@@ -67,7 +67,7 @@ func TestCardInspectionExceptionsTrustAndMalformed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			o := CardInspectionOptions{CertificateResolver: f}
+			o := CardInspectionOptions{CertificateResolver: f, TemporalEvidence: cardTestTime(f)}
 			want := "VALID"
 			input := []byte(nil)
 			switch name {
@@ -125,6 +125,7 @@ func TestCardInspectionExceptionsTrustAndMalformed(t *testing.T) {
 			if input == nil {
 				input = f.Bytes()
 			}
+			o.TemporalEvidence = cardTestTime(f)
 			r := o.Inspect(context.Background(), input)
 			if r.AcceptanceStatus != want {
 				t.Fatalf("%s want %s: %+v", r.AcceptanceStatus, want, r.Defects)
@@ -167,7 +168,7 @@ func TestCardInspectionHistoricalExceptions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			o := CardInspectionOptions{CertificateResolver: f}
+			o := CardInspectionOptions{CertificateResolver: f, TemporalEvidence: cardTestTime(f)}
 			want := "VALID"
 			switch name {
 			case "historicalG2V1WithoutLink", "observedG2V1RequiresLink":
@@ -186,6 +187,7 @@ func TestCardInspectionHistoricalExceptions(t *testing.T) {
 				f.Files[0x000202] = append([]byte(nil), f.Files[0x000200]...)
 				f.Files[0x000502] = append([]byte(nil), f.Files[0x000500]...)
 			}
+			o.TemporalEvidence = cardTestTime(f)
 			r := o.Inspect(context.Background(), f.Bytes())
 			if r.AcceptanceStatus != want {
 				t.Fatalf("%s want %s: %+v", r.AcceptanceStatus, want, r.Defects)

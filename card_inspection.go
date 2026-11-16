@@ -10,6 +10,10 @@ type CardFileInspection = card.DownloadInspection
 type CardInspectionProfile = card.DownloadProfile
 type CardInspectionDefect = card.InventoryDefect
 type CardInspectionBlock = card.InspectionBlock
+type CardTemporalEvidence = card.TemporalEvidence
+type CardAuthenticationEvidence = card.AuthenticationEvidence
+
+const CardAuthenticationPolicyVersion = card.AuthenticationPolicyVersion
 
 func CheckCardInventory(raw *cardv1.RawCardFile) (CardInspectionProfile, []CardInspectionDefect) {
 	p := card.ResolveDownloadProfile(raw, "", false)
@@ -21,8 +25,9 @@ type CardInspectionOptions struct {
 	ObservedCard        bool
 	ObservedPresentTags []int
 	CertificateResolver CertificateResolver
+	TemporalEvidence    *CardTemporalEvidence
 }
 
 func (o CardInspectionOptions) Inspect(ctx context.Context, input []byte) *CardFileInspection {
-	return (card.InspectionOptions{AuthenticateOptions: card.AuthenticateOptions{CertificateResolver: o.CertificateResolver}, ExpectedGeneration: o.ExpectedGeneration, ObservedCard: o.ObservedCard, ObservedPresentTags: o.ObservedPresentTags}).InspectDownload(ctx, input)
+	return (card.InspectionOptions{AuthenticateOptions: card.AuthenticateOptions{CertificateResolver: o.CertificateResolver, TemporalEvidence: o.TemporalEvidence}, ExpectedGeneration: o.ExpectedGeneration, ObservedCard: o.ObservedCard, ObservedPresentTags: o.ObservedPresentTags}).InspectDownload(ctx, input)
 }

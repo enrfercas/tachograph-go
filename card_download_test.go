@@ -15,7 +15,7 @@ func TestCompleteCardDownloadWithTestTrust(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			options := CardDownloadValidationOptions{ExpectedGeneration: generation, CertificateResolver: fixture}
+			options := CardDownloadValidationOptions{ExpectedGeneration: generation, CertificateResolver: fixture, TemporalEvidence: cardTestTime(fixture)}
 			result, err := options.Validate(context.Background(), fixture.Bytes())
 			if err != nil {
 				t.Fatal(err)
@@ -52,7 +52,7 @@ func TestCompleteCardDownloadVerifiesRootLink(t *testing.T) {
 	if err := fixture.RotateRoot(); err != nil {
 		t.Fatal(err)
 	}
-	options := CardDownloadValidationOptions{ExpectedGeneration: "G2V2", CertificateResolver: fixture}
+	options := CardDownloadValidationOptions{ExpectedGeneration: "G2V2", CertificateResolver: fixture, TemporalEvidence: cardTestTime(fixture)}
 	if result, err := options.Validate(context.Background(), fixture.Bytes()); err != nil || result.AuthenticityStatus != AuthenticityVerified {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestCompleteCardDownloadVerifiesRootLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (AuthenticateOptions{CertificateResolver: fixture}).Authenticate(context.Background(), raw); err != nil {
+	if _, err := (AuthenticateOptions{CertificateResolver: fixture, TemporalEvidence: cardTestTime(fixture)}).Authenticate(context.Background(), raw); err != nil {
 		t.Fatal("normal import authentication failed", err)
 	}
 	link := fixture.Files[0xc10902]
@@ -83,7 +83,7 @@ func TestCompleteDownloadMustAlsoBeRecognizedByNormalImport(t *testing.T) {
 			}
 			delete(fixture.Files, 0x000200)
 			delete(fixture.Files, 0x000500)
-			if result, err := (CardDownloadValidationOptions{ExpectedGeneration: generation, CertificateResolver: fixture}).Validate(context.Background(), fixture.Bytes()); err != nil || !result.SemanticValid || result.AcquisitionStatus != AcquisitionComplete {
+			if result, err := (CardDownloadValidationOptions{ExpectedGeneration: generation, CertificateResolver: fixture, TemporalEvidence: cardTestTime(fixture)}).Validate(context.Background(), fixture.Bytes()); err != nil || !result.SemanticValid || result.AcquisitionStatus != AcquisitionComplete {
 				t.Fatal("normal importer must recognize valid application evidence without ICC/IC", err)
 			}
 			original := fixture.Files[0x050100]
@@ -110,7 +110,7 @@ func TestCompleteG2V2WithP521TestChainAnd132ByteSignatures(t *testing.T) {
 	if len(fixture.Signatures[0x052502]) != 132 {
 		t.Fatal("wrong P521 fixture signature length")
 	}
-	if result, err := (CardDownloadValidationOptions{ExpectedGeneration: "G2V2", CertificateResolver: fixture}).Validate(context.Background(), fixture.Bytes()); err != nil || result.AuthenticityStatus != AuthenticityVerified {
+	if result, err := (CardDownloadValidationOptions{ExpectedGeneration: "G2V2", CertificateResolver: fixture, TemporalEvidence: cardTestTime(fixture)}).Validate(context.Background(), fixture.Bytes()); err != nil || result.AuthenticityStatus != AuthenticityVerified {
 		t.Fatal(err)
 	}
 }

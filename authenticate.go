@@ -32,6 +32,8 @@ type AuthenticateOptions struct {
 	// CertificateResolver is used to resolve CA certificates by their Certificate Authority Reference (CAR).
 	// If nil, this defaults to using DefaultCertificateResolver.
 	CertificateResolver CertificateResolver
+	// TemporalEvidence applies only to CARD, independently of VU authentication.
+	TemporalEvidence *CardTemporalEvidence
 
 	// Mutate controls whether authentication modifies the input RawFile in-place.
 	//
@@ -67,6 +69,7 @@ func (o AuthenticateOptions) Authenticate(ctx context.Context, rawFile *tachogra
 	// Convert top-level options to internal options
 	cardOpts := card.AuthenticateOptions{
 		CertificateResolver: o.CertificateResolver,
+		TemporalEvidence:    o.TemporalEvidence,
 	}
 	vuOpts := vu.AuthenticateOptions{
 		CertificateResolver: o.CertificateResolver,

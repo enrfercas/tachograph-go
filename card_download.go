@@ -13,21 +13,22 @@ import (
 // CardDownloadValidation is a versioned gate for a newly acquired PC/SC file.
 // It never reports success from the analyzer's historical fallback path.
 type CardDownloadValidation struct {
-	Inspection           *CardFileInspection           `json:"inspection,omitempty"`
-	Contract             string                        `json:"contract"`
-	Generation           string                        `json:"generation"`
-	SHA256               string                        `json:"sha256"`
-	StructuralValid      bool                          `json:"structuralValid"`
-	SemanticValid        bool                          `json:"semanticValid"`
-	Cryptography         string                        `json:"cryptography"`
-	RecordCount          int                           `json:"recordCount"`
-	Profile              string                        `json:"profile"`
-	AcquisitionStatus    AcquisitionStatus             `json:"acquisitionStatus"`
-	StructuralStatus     StructuralStatus              `json:"structuralStatus"`
-	AuthenticityStatus   AuthenticityStatus            `json:"authenticityStatus"`
-	PhysicalCompleteness string                        `json:"physicalCompleteness"`
-	Observations         []CardDownloadEFObservation   `json:"observations"`
-	Issues               []CardDownloadValidationIssue `json:"issues"`
+	Inspection             *CardFileInspection           `json:"inspection,omitempty"`
+	AuthenticationEvidence *CardAuthenticationEvidence   `json:"authenticationEvidence,omitempty"`
+	Contract               string                        `json:"contract"`
+	Generation             string                        `json:"generation"`
+	SHA256                 string                        `json:"sha256"`
+	StructuralValid        bool                          `json:"structuralValid"`
+	SemanticValid          bool                          `json:"semanticValid"`
+	Cryptography           string                        `json:"cryptography"`
+	RecordCount            int                           `json:"recordCount"`
+	Profile                string                        `json:"profile"`
+	AcquisitionStatus      AcquisitionStatus             `json:"acquisitionStatus"`
+	StructuralStatus       StructuralStatus              `json:"structuralStatus"`
+	AuthenticityStatus     AuthenticityStatus            `json:"authenticityStatus"`
+	PhysicalCompleteness   string                        `json:"physicalCompleteness"`
+	Observations           []CardDownloadEFObservation   `json:"observations"`
+	Issues                 []CardDownloadValidationIssue `json:"issues"`
 }
 
 type AcquisitionStatus string
@@ -71,6 +72,7 @@ type CardDownloadValidationOptions struct {
 	// ExpectedGeneration must come from the application observed on the card.
 	ExpectedGeneration  string
 	CertificateResolver CertificateResolver
+	TemporalEvidence    *CardTemporalEvidence
 	// ObservedCard distinguishes PC/SC evidence from an old downloaded file.
 	ObservedCard bool
 }
@@ -83,7 +85,8 @@ type CardDownloadValidationOptions struct {
 func (o CardDownloadValidationOptions) Validate(ctx context.Context, input []byte) (*CardDownloadValidation, error) {
 	sum := sha256.Sum256(input)
 	result := &CardDownloadValidation{Contract: "pcsc-card-3/v1", Profile: "APPENDIX_7_DRIVER", Generation: o.ExpectedGeneration, SHA256: hex.EncodeToString(sum[:]), AcquisitionStatus: AcquisitionIncomplete, StructuralStatus: StructureInvalid, AuthenticityStatus: AuthenticityUnverified, Cryptography: "unverified", PhysicalCompleteness: "NOT_ASSESSED", Observations: []CardDownloadEFObservation{}, Issues: []CardDownloadValidationIssue{}}
-	result.Inspection = (CardInspectionOptions{ExpectedGeneration: o.ExpectedGeneration, ObservedCard: true, CertificateResolver: o.CertificateResolver}).Inspect(ctx, input)
+	result.Inspection = (CardInspectionOptions{ExpectedGeneration: o.ExpectedGeneration, ObservedCard: true, CertificateResolver: o.CertificateResolver, TemporalEvidence: o.TemporalEvidence}).Inspect(ctx, input)
+	result.AuthenticationEvidence = result.Inspection.AuthenticationEvidence
 	rawCard, err := card.UnmarshalOptions{}.UnmarshalRawCardFile(input)
 	if err != nil {
 		result.Issues = append(result.Issues, CardDownloadValidationIssue{Scope: "structure", Code: "tlv_truncated_or_invalid"})
@@ -129,7 +132,8 @@ func (o CardDownloadValidationOptions) Validate(ctx context.Context, input []byt
 	if !result.SemanticValid {
 		result.Issues = append(result.Issues, CardDownloadValidationIssue{Scope: "analysis", Code: "semantic_decoder_unavailable"})
 	}
-	assessment := (card.AuthenticateOptions{CertificateResolver: o.CertificateResolver}).AssessAuthenticity(ctx, rawCard)
+	assessment := (card.AuthenticateOptions{CertificateResolver: o.CertificateResolver, TemporalEvidence: o.TemporalEvidence}).AssessAuthenticity(ctx, rawCard)
+	result.AuthenticationEvidence = assessment.Evidence
 	result.AuthenticityStatus = AuthenticityStatus(assessment.Status)
 	switch result.AuthenticityStatus {
 	case AuthenticityVerified:
