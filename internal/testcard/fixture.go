@@ -326,6 +326,33 @@ func (f *Fixture) SetCardExpiry(seconds uint32) error {
 	return nil
 }
 
+// SetData replaces an anonymous test data EF and signs it with this fixture's
+// existing test key. It supports transport boundary tests, not production PKI.
+func (f *Fixture) SetData(tag int, data []byte) error {
+	if tag>>8 < 0x0500 || tag>>8 > 0x05ff || tag&1 != 0 || len(data) == 0 || len(data) >= 65535 {
+		return fmt.Errorf("invalid test data EF")
+	}
+	var signature []byte
+	if tag&2 == 0 {
+		h := sha1.Sum(data)
+		var err error
+		signature, err = rsa.SignPKCS1v15(rand.Reader, f.rsaKey, crypto.SHA1, h[:])
+		if err != nil {
+			return err
+		}
+	} else {
+		r, s, err := ecdsa.Sign(rand.Reader, f.ecKey, eccHash(f.ecKey, data))
+		if err != nil {
+			return err
+		}
+		width := (f.ecKey.Params().BitSize + 7) / 8
+		signature = append(r.FillBytes(make([]byte, width)), s.FillBytes(make([]byte, width))...)
+	}
+	f.Files[tag] = append([]byte(nil), data...)
+	f.Signatures[tag] = signature
+	return nil
+}
+
 func (f *Fixture) Bytes() []byte {
 	var out []byte
 	appendBlock := func(tag int, b []byte) {
